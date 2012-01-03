@@ -1,0 +1,245 @@
+<?php
+
+/**
+ * Implementation of hook_permission.
+ */
+function postmark_inbound_permission() {
+
+  return array('administer postmark inbound' => array('title' => 'Administer Settings', 'description' => 'Change what is done with submitted data'));
+
+}
+
+/**
+ * Implementation of hook_menu()
+ */
+function postmark_inbound_menu() {
+
+  // Register the API endpoint.
+  $endpoint_path = 'endpoints/postmark-inbound';
+  
+  $items[$endpoint_path] = array(
+    'title' => 'Postmark Processing Endpoint',
+      'page callback' => 'postmark_inbound_process_data',
+    'access arguments' => 'access content',
+    'type' => MENU_CALLBACK
+  );
+  
+  // Register the admin path.
+  $items['admin/config/postmark-inbound'] = array(
+    'title' => 'Postmark Processing Endpoint',
+    'description' => 'Configure postmark inbound processing',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('postmark_inbound_admin'),
+    'access arguments' => array('administer postmark inbound'),
+    'type' => MENU_NORMAL_ITEM
+  );
+  
+  return $items;
+  
+}
+
+function postmark_inbound_admin($form, &$form_state) {
+  
+  if (variable_get('postmark_inbound_hash')) {
+   
+    $form['postmarkapp_hash'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Postmark Inbound Information (READ ONLY)'),
+      '#description' => t('Your postmark inbound email address and receiving endpoint.'),
+      '#collapsible' => FALSE,
+    );
+    
+    $form['postmarkapp_hash']['email'] = array(
+      '#type' => 'textfield',
+      '#disabled' => FALSE,
+      '#title' => t('Inbound Email'),
+      '#description' => 'You can access the first part of your inbound address by using <code>variable_get(\'postmark_inbound_hash\');</code>',
+      '#default_value' => variable_get('postmark_inbound_hash') . '@postmarkapp.com'
+    );
+    
+  }
+  
+  // API KEY
+  
+  $form['postmarkapp_key'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Postmark API Key'),
+    '#description' => t('Please enter your Postmark API key.'),
+    '#collapsible' => FALSE,
+  );
+
+  $form['postmarkapp_key']['key'] = array(
+    '#type' => 'textfield',
+    '#title' => t('API Key.'),
+    '#default_value' => variable_get('postmark_api_key')
+  );
+
+  // Processing Method
+  
+  $form['postmarkapp_method'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Inbound Processing',
+    '#description' => t('Choose what to do with the data when it is received.'),
+    '#collapsible' => FALSE
+  );
+  
+  $form['postmarkapp_method']['method'] = array(
+    
+    '#type' => 'radios',
+    '#title' => t('Processing method'),
+    '#options' => array(t('Create a node'), t('Pass directly to the rules module'))
+    
+    );
+  
+  // Submit Button
+  
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Save')
+  );
+
+  return $form;
+
+}
+/**
+ * Implementation of _form_validate();
+ */
+function postmark_inbound_admin_validate(&$form, &$form_state) {
+  
+  if (empty($form_state['values']['key'])) {
+    
+    form_set_error('key', t('You must enter an API key.'));   
+  } 
+  else {
+    
+    // Make a call to the postmark API to validate the API key, look for an 'InboundHash'
+     
+    $headers = array(
+      'Accept: application/json',
+      'Content-Type: applications/json',
+      'X-Postmark-Server-Token: ' . $form_state['values']['key']
+    );
+
+    $ch = curl_init();
+
+    curl_setopt($ch, CURLOPT_URL, 'https://api.postmarkapp.com/server');
+
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);  
+
+    $return = curl_exec($ch);
+
+    $curl_error = curl_error($ch);
+
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if ($http_code == 200) {
+
+      $returnData = (array)json_decode($return);
+
+      if (array_key_exists('InboundHash', $returnData)) {
+
+        drupal_set_message( t('You have inbound processing enabled on your server, splendid.'), 'status');
+
+        variable_set('postmark_inbound_hash', $returnData['InboundHash']);
+        
+        postmark_inbound_validateInboundHookUrl($returnData, $form_state['values']['key']);
+        
+      }
+      else {
+
+        drupal_set_message(t('You don\'t have inbound processing privileges.'), 'error');
+
+      }
+
+      drupal_set_message(t('Thanks, we\'ve saved your API key'), 'status');
+
+      variable_set('postmark_api_key', $form_state['values']['key']);
+
+    }
+  
+  }
+  
+}
+
+/**
+ * Performs a quick check to see if the returned data from the API call has an inboundhook url, and that
+ * it matches the one we need it to.
+ * 
+ * If it doesn't, it sets the InboundHookUrl to match the endpoint we've set up for the site.
+ */
+
+function postmark_inbound_validateInboundHookUrl($data = array(), $key) {
+  
+  global $base_url;
+  
+  $endpoint_path = 'endpoints/postmark-inbound';
+  
+  if (array_key_exists('InboundHookUrl', $data) && $data['InboundHookUrl'] == $base_url . '/' . $endpoint_path) {
+    
+    drupal_set_message(t('The inbound endpoint was set correctly'), 'status');
+    
+  }
+  else {
+   
+    // Send a request to postmark app to change it.
+    $endpointUrl = $base_url . '/' . $endpoint_path;
+    
+    $headers = array(
+      'Accept: application/json',
+      'Content-Type: applications/json',
+      'X-Postmark-Server-Token: ' . $key
+    );
+    
+    $ch = curl_init();
+
+    curl_setopt($ch, CURLOPT_URL, 'https://api.postmarkapp.com/server');
+
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+
+    $sendData = new stdClass();
+
+    $sendData->InboundHookUrl = $endpointUrl;
+
+    //print_r($sendData);
+
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($sendData));
+
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+
+    $return = json_decode(curl_exec($ch));
+
+    $curl_error = curl_error($ch);
+
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if ($http_code == 200) {
+
+      drupal_set_message(t('Your API endpoint has been set'), 'status');
+
+    }
+    else {
+     
+      drupal_set_message(t("There was a problem setting the API endpoing, you may have to do it manually at http://postmarkapp.com"), 'error');
+      
+    }
+    
+  }
+  
+}
+
+/**
+ * This function routes the data to the appropriate place.
+ */
+function postmark_inbound_process_data() {
+
+  header('Accepts: application/json');
+  
+  header('Content-type: text/plain');
+  
+  print_r($_GET);
+  
+}

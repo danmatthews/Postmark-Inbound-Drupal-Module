@@ -1,0 +1,6 @@
+name = Postmark Inbound Processing Library
+description = Provides a site endpoint for use with Postmarkapp.com's inbound processing library.
+core = 7.x
+version = 0.1b
+configure = admin/config/postmark-inbound
+dependencies[] = rules
